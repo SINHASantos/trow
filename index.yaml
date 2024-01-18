@@ -2,6 +2,18 @@ apiVersion: v1
 entries:
   trow:
   - apiVersion: v2
+    appVersion: 0.6.3
+    created: "2024-01-18T10:39:20.679593136Z"
+    description: Helm chart for Trow registry
+    digest: fbad2a4b41a4c773b132470acf012e18341f00f724370fe294c50c354d4382a5
+    home: https://trow.io
+    kubeVersion: '>= 1.26.0-0'
+    name: trow
+    type: application
+    urls:
+    - https://github.com/SINHASantos/trow/releases/download/trow-0.6.4/trow-0.6.4.tgz
+    version: 0.6.4
+  - apiVersion: v2
     appVersion: 0.6.0
     created: "2023-09-18T19:08:23.796700457Z"
     description: Helm chart for Trow registry
@@ -51,4 +63,4 @@ entries:
     urls:
     - https://github.com/ContainerSolutions/trow/releases/download/v0.2.0/trow-0.1.0.tgz
     version: 0.1.0
-generated: "2023-09-18T19:08:23.796714557Z"
+generated: "2024-01-18T10:39:20.679622601Z"
