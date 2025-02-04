@@ -3,7 +3,6 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::Router;
 use http_body_util::BodyExt;
-use hyper::body::Buf;
 use hyper::Response;
 use serde::de::DeserializeOwned;
 use test_temp_dir::TestTempDir;
@@ -28,14 +27,20 @@ pub async fn trow_router<F: FnOnce(&mut TrowConfig)>(
 }
 
 pub async fn response_body_json<T: DeserializeOwned>(resp: Response<Body>) -> T {
-    let reader = resp
+    let buf = resp
         .into_body()
         .collect()
         .await
         .unwrap()
-        .aggregate()
-        .reader();
-    serde_json::from_reader(reader).unwrap()
+        .to_bytes()
+        .to_vec();
+    match serde_json::from_slice(&buf) {
+        Ok(val) => val,
+        Err(err) => {
+            let text = String::from_utf8_lossy(&buf);
+            panic!("unable to deserialize response body: {err:?} {text}");
+        }
+    }
 }
 
 /// test_temp_dir if thread name != module path, which is the case in parametrized tests
@@ -45,15 +50,20 @@ pub fn test_temp_dir_from_thread_name(mod_path: &str) -> TestTempDir {
         let thread = std::thread::current();
         let thread = thread.name().unwrap();
         let (t_mod, fn_) = thread.rsplit_once("::").unwrap();
-        Ok::<_, anyhow::Error>(format!("{crate_}::{t_mod}::{fn_}"))
-    }
-    .expect("unable to calculate complete test function path");
+        format!("{crate_}::{t_mod}::{fn_}")
+    };
 
     test_temp_dir::TestTempDir::from_complete_item_path(&path)
+}
+
+macro_rules! resp_header {
+    ($name:expr, $value:expr) => {
+        $name.headers().get($value).unwrap().to_str().unwrap()
+    };
 }
 
 macro_rules! test_temp_dir { {} => {
     $crate::test_utilities::test_temp_dir_from_thread_name(module_path!())
 } }
 
-pub(crate) use test_temp_dir;
+pub(crate) use {resp_header, test_temp_dir};

@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.7.1 (2025-01-29)
+
+Fix: when downloading proxied image, wait for all blobs to be successfully downloaded before saving the manifest in the DB.
+
+## v0.7.0 (2025-01-28)
+
+### BREAKING
+
+Trow now uses a database to store the registry state.
+Currently no migration is provided, the `data/` directory needs to be wiped.
+
+### Features
+
+* Trow now uses a database (sqlite) to store the registry state
+* Support for the referrers API
+
+### Fixes
+
+* Fix authentication always failing (`invalid username/password`)
+
+### Changes
+
+* `--proxy-registry-config-file` and `--image-validation-config-file` are merged into `--config-file`
+* Lots of code refactoring (use sqlite database)
+
 ## v0.6.4
 
 Allow mutating webhook to ignore some repos (fix chicken and egg problem)

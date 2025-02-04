@@ -5,6 +5,7 @@ mod blob_upload;
 mod catalog;
 mod health;
 mod manifest;
+mod manifest_referrers;
 mod readiness;
 
 // helpers
@@ -30,7 +31,6 @@ use response::trow_token::{self, TrowToken, ValidBasicToken};
 use tower::ServiceBuilder;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::{cors, trace};
-use tracing::{event, Level};
 
 use crate::TrowServerState;
 
@@ -49,14 +49,14 @@ fn add_router_layers<S: Send + Sync + Clone + 'static>(
                 )
             })
             .on_response(
-                |body: &Response<Body>, duration: Duration, _span: &tracing::Span| {
-                    let size = body.size_hint();
+                |resp: &Response<Body>, duration: Duration, _span: &tracing::Span| {
+                    let size = resp.size_hint();
                     let size_str = humansize::format_size(
                         size.upper().unwrap_or(size.lower()),
                         humansize::BINARY.space_after_value(false),
                     );
                     tracing::info!(
-                        status = body.status().as_str(),
+                        status = resp.status().as_str(),
                         duration_ms = duration.as_millis(),
                         size = size_str,
                         "response sent"
@@ -132,6 +132,7 @@ pub fn create_app(state: Arc<super::TrowServerState>) -> Router {
     app = blob_upload::route(app);
     app = catalog::route(app);
     app = manifest::route(app);
+    app = manifest_referrers::route(app);
     app = admission::route(app);
 
     app = add_router_layers(app, &state.config.cors);
@@ -179,7 +180,7 @@ async fn login(
     match tok {
         Ok(t) => Ok(t),
         Err(e) => {
-            event!(Level::ERROR, "Failed to create token: {:#}", e);
+            tracing::error!("Failed to create token: {:#}", e);
             Err(Error::InternalError)
         }
     }

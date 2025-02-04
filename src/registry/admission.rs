@@ -2,7 +2,6 @@ use json_patch::{Patch, PatchOperation};
 use k8s_openapi::api::core::v1::Pod;
 use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use serde::{Deserialize, Serialize};
-use tracing::{event, Level};
 
 use super::TrowServer;
 use crate::registry::proxy::RemoteImage;
@@ -27,7 +26,7 @@ fn check_image_is_allowed(
         "Allow" => true,
         "Deny" => false,
         _ => {
-            event!(Level::WARN, "Invalid default image validation config: `{}`. Should be `Allow` or `Deny`. Default to `Deny`.", config.default);
+            tracing::warn!( "Invalid default image validation config: `{}`. Should be `Allow` or `Deny`. Default to `Deny`.", config.default);
             false
         }
     };
@@ -83,7 +82,7 @@ impl TrowServer {
     pub async fn validate_admission(&self, ar: &AdmissionRequest<Pod>) -> AdmissionResponse {
         let resp = AdmissionResponse::from(ar);
 
-        if self.image_validation_config.is_none() {
+        if self.config.image_validation.is_none() {
             return resp.deny("Image validation not configured");
         }
         let pod = match &ar.object {
@@ -97,7 +96,7 @@ impl TrowServer {
 
         for image_raw in images {
             let (v, r) =
-                check_image_is_allowed(&image_raw, self.image_validation_config.as_ref().unwrap());
+                check_image_is_allowed(&image_raw, self.config.image_validation.as_ref().unwrap());
             if !v {
                 valid = false;
                 reasons.push(format!("{image_raw}: {r}"));
@@ -118,11 +117,11 @@ impl TrowServer {
         host_name: &str,
     ) -> AdmissionResponse {
         let resp = AdmissionResponse::from(ar);
-        let proxy_config = &self.proxy_registry_config;
+        let proxy_config = &self.config.registry_proxies;
         let pod = match &ar.object {
             Some(pod) => pod,
             None => {
-                event!(Level::WARN, "No pod in pod admission mutation request");
+                tracing::warn!("No pod in pod admission mutation request");
                 return resp;
             }
         };
@@ -132,10 +131,7 @@ impl TrowServer {
             let image = match RemoteImage::try_from_str(raw_image) {
                 Ok(image) => image,
                 Err(e) => {
-                    event!(
-                        Level::WARN,
-                        "Could not parse image reference `{raw_image}` ({e})",
-                    );
+                    tracing::warn!("Could not parse image reference `{raw_image}` ({e})",);
                     continue;
                 }
             };
@@ -152,8 +148,7 @@ impl TrowServer {
                     .iter()
                     .any(|repo| image_repo == repo);
                 if !ignored {
-                    event!(
-                        Level::INFO,
+                    tracing::info!(
                         "mutate_admission: proxying image {} to {}",
                         raw_image,
                         proxy_config.alias
@@ -178,7 +173,7 @@ impl TrowServer {
         match resp.with_patch(patch) {
             Ok(resp) => resp,
             Err(e) => {
-                event!(Level::WARN, "Produced invalid admission patch: {}", e);
+                tracing::warn!("Produced invalid admission patch: {}", e);
                 AdmissionResponse::invalid("Internal error serializing the patch")
             }
         }

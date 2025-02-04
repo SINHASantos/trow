@@ -1,46 +1,47 @@
 # syntax=docker/dockerfile:1
 
-#Note we build on host plaftform and cross-compile to target arch
-FROM --platform=$BUILDPLATFORM rust:bookworm as cross
+# Cross compiling from host platform instead of using qemu
+FROM --platform=$BUILDPLATFORM rust:bookworm AS cross
 
 ARG TARGETARCH
 WORKDIR /usr/src/trow
 
-ENV PKG_CONFIG_SYSROOT_DIR=/
+ENV PKG_CONFIG_SYSROOT_DIR=/ \
+    SQLX_OFFLINE=true
 
-# should write /.platform and
 RUN --mount=type=bind,source=docker/platform.sh,target=/platform.sh \
     /platform.sh
 
-RUN rustup component add rustfmt
 RUN rustup target add $(cat /.platform)
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt update && \
-    apt-get install -y unzip openssl protobuf-compiler $(cat /.compiler)
+    rm -f /etc/apt/apt.conf.d/docker-clean &&\
+    apt-get update &&\
+    apt-get install -y unzip openssl $(cat /.compiler)
 
 COPY . .
 
-RUN cargo install sqlx-cli --no-default-features --features sqlite
-
 # Get rid of the "cp" when cargo build --out is stable
 RUN --mount=type=cache,target=./target \
-    cargo sqlx database setup && \
-    cargo build --release --target $(cat /.platform) && \
+    cargo build --release --target $(cat /.platform) &&\
     cp /usr/src/trow/target/$(cat /.platform)/release/trow /usr/src/trow/
 
 
 
 FROM debian:bookworm-slim
+
+LABEL org.opencontainers.image.source="https://github.com/trow-registry/trow"
+LABEL org.opencontainers.image.description="Caching Container Registry and Image Management for Kubernetes Clusters"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
 RUN groupadd -r -g 2000 trow &&\
     useradd -r -g trow -u 2000 trow
-
 
 # Note that certs are needed for proxying
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && \
+    apt-get update &&\
     apt-get install -y --no-install-recommends openssl ca-certificates
 
 RUN mkdir -p /data /certs &&\

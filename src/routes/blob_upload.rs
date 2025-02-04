@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::response::Response;
@@ -70,8 +69,8 @@ mod utils {
         let size_i64 = size.total_stored as i64;
         sqlx::query!(
             r#"
-            INSERT INTO blob (digest, size, is_manifest)
-            VALUES ($1, $2, false) ON CONFLICT (digest) DO NOTHING
+            INSERT INTO blob (digest, size)
+            VALUES ($1, $2) ON CONFLICT (digest) DO NOTHING
             "#,
             digest_str,
             size_i64
@@ -80,10 +79,7 @@ mod utils {
         .await?;
 
         sqlx::query!(
-            r#"
-            INSERT INTO repo_blob_association
-            VALUES ($1, $2)
-            "#,
+            "INSERT INTO repo_blob_association VALUES ($1, $2) ON CONFLICT DO NOTHING",
             upload.repo,
             digest_str,
         )
@@ -94,7 +90,7 @@ mod utils {
             digest.clone(),
             upload.repo,
             upload_id_bin,
-            (0, (size.total_stored as u32).saturating_sub(1)), // Note first byte is 0
+            (0, size.total_stored.saturating_sub(1)), // Note first byte is 0
         ))
     }
 }
@@ -142,6 +138,7 @@ async fn put_blob_upload(
     )
     .await?;
 
+    // missing location header
     Ok(accepted_upload)
 }
 
@@ -180,6 +177,9 @@ async fn patch_blob_upload(
     Path((repo, uuid)): Path<(String, uuid::Uuid)>,
     chunk: Body,
 ) -> Result<UploadInfo, Error> {
+    if repo.starts_with(PROXY_DIR) {
+        return Err(Error::UnsupportedForProxiedRepo);
+    }
     let uuid_str = uuid.to_string();
     sqlx::query!(
         r#"
@@ -197,14 +197,10 @@ async fn patch_blob_upload(
         .storage
         .write_blob_part_stream(&uuid, chunk.into_data_stream(), content_range)
         .await?;
-    let total_stored = size.total_stored as u32;
-
+    let total_stored = size.total_stored as i64;
     sqlx::query!(
-        r#"
-        UPDATE blob_upload
-        SET offset=$1
-        WHERE uuid=$1
-        "#,
+        "UPDATE blob_upload SET offset=$2 WHERE uuid=$1",
+        uuid_str,
         total_stored,
     )
     .execute(&mut *state.db.acquire().await?)
@@ -213,7 +209,7 @@ async fn patch_blob_upload(
     Ok(UploadInfo::new(
         uuid_str,
         repo,
-        (0, (total_stored).saturating_sub(1)), // Note first byte is 0
+        (0, (size.total_stored).saturating_sub(1)), // Note first byte is 0
     ))
 }
 
@@ -304,6 +300,9 @@ async fn get_blob_upload(
     State(state): State<Arc<TrowServerState>>,
     Path((repo_name, upload_id)): Path<(String, uuid::Uuid)>,
 ) -> Result<Response, Error> {
+    if repo_name.starts_with(PROXY_DIR) {
+        return Err(Error::UnsupportedForProxiedRepo);
+    }
     let upload_id_str = upload_id.to_string();
     let offset: i64 = sqlx::query_scalar!(
         "SELECT offset FROM blob_upload WHERE uuid = $1 AND repo = $2",
@@ -316,7 +315,7 @@ async fn get_blob_upload(
 
     Ok(Response::builder()
         .header("Docker-Upload-UUID", upload_id.to_string())
-        .header("Range", format!("0-{}", offset - 1)) // Offset is 0-based
+        .header("Range", format!("0-{}", (offset as u64).saturating_sub(1)))
         .header("Content-Length", "0")
         .header("Location", location)
         .status(StatusCode::NO_CONTENT)
@@ -353,8 +352,6 @@ pub fn route(mut app: Router<Arc<TrowServerState>>) -> Router<Arc<TrowServerStat
 #[cfg(test)]
 mod tests {
 
-    use std::io::BufReader;
-
     use axum::body::Body;
     use http_body_util::BodyExt;
     use hyper::Request;
@@ -365,8 +362,9 @@ mod tests {
 
     use super::*;
     use crate::registry::Digest;
-    use crate::test_utilities;
+    use crate::test_utilities::{self, resp_header};
 
+    // POST blob upload
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_post_blob_upload_create_new_upload() {
@@ -400,6 +398,7 @@ mod tests {
         .unwrap();
     }
 
+    // POST followed by a single PUT
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_put_blob_upload() {
@@ -420,39 +419,36 @@ mod tests {
             "resp: {:?}",
             resp.into_body().collect().await.unwrap().to_bytes()
         );
-        let resp_headers = resp.headers();
-        let uuid = resp_headers
-            .get(test_utilities::UPLOAD_HEADER)
-            .unwrap()
-            .to_str()
-            .unwrap();
 
-        let range = resp_headers
-            .get(test_utilities::RANGE_HEADER)
-            .unwrap()
-            .to_str()
-            .unwrap();
+        let uuid = resp_header!(resp, test_utilities::UPLOAD_HEADER);
+        let range = resp_header!(resp, test_utilities::RANGE_HEADER);
+        let location = resp_header!(resp, test_utilities::LOCATION_HEADER);
         assert_eq!(range, "0-0"); // Haven't uploaded anything yet
+        assert_eq!(
+            location,
+            format!("/v2/{}/blobs/uploads/{}", repo_name, uuid)
+        );
 
-        //used by oci_manifest_test
-        let config = "{}\n".as_bytes();
-        let digest = Digest::digest_sha256(BufReader::new(config)).unwrap();
+        let blob = "super secret blob".as_bytes();
+        let digest = Digest::digest_sha256_slice(blob);
         let loc = &format!("/v2/{}/blobs/uploads/{}?digest={}", repo_name, uuid, digest);
 
         let resp = router
-            .call(Request::put(loc).body(Body::from(config)).unwrap())
+            .call(Request::put(loc).body(Body::from(blob)).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
+
         let range = resp
             .headers()
             .get(test_utilities::RANGE_HEADER)
             .unwrap()
             .to_str()
             .unwrap();
-        assert_eq!(range, format!("0-{}", (config.len() - 1))); //note first byte is 0, hence len - 1
+        assert_eq!(range, format!("0-{}", (blob.len() - 1))); //note first byte is 0, hence len - 1
     }
 
+    /// A single POST
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_post_blob_upload_complete_upload() {
@@ -461,7 +457,7 @@ mod tests {
         let repo_name = "test";
 
         let config = "{ }\n".as_bytes();
-        let digest = Digest::digest_sha256(BufReader::new(config)).unwrap();
+        let digest = Digest::digest_sha256_slice(config);
 
         let resp = router
             .clone()
@@ -485,6 +481,7 @@ mod tests {
         assert_eq!(range, format!("0-{}", (config.len() - 1))); //note first byte is 0, hence len - 1
     }
 
+    // POST (skipped) then PATCH
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_patch_blob_upload() {
